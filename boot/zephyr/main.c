@@ -46,6 +46,7 @@
 #include "bootutil/fault_injection_hardening.h"
 #include "bootutil/mcuboot_status.h"
 #include "flash_map_backend/flash_map_backend.h"
+#include "can_recovery.h"
 
 /* Check if Espressif target is supported */
 #ifdef CONFIG_SOC_FAMILY_ESPRESSIF_ESP32
@@ -493,6 +494,10 @@ int main(void)
 
     mcuboot_status_change(MCUBOOT_STATUS_STARTUP);
 
+#ifdef CONFIG_BOOT_CAN_RECOVERY
+    boot_can_recovery_check();
+#endif
+
 #ifdef CONFIG_BOOT_SERIAL_ENTRANCE_GPIO
     BOOT_LOG_DBG("Checking GPIO for serial recovery");
     if (io_detect_pin() &&
@@ -635,6 +640,9 @@ int main(void)
     mcuboot_status_change(MCUBOOT_STATUS_BOOTABLE_IMAGE_FOUND);
 
     ZEPHYR_BOOT_LOG_STOP();
+#ifdef CONFIG_BOOT_CAN_RECOVERY
+    boot_can_recovery_note_boot_attempt();
+#endif
     do_boot(&rsp);
 
     mcuboot_status_change(MCUBOOT_STATUS_BOOT_FAILED);

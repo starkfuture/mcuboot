@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: Apache-2.0
+
+menu "CAN recovery"
+
+config BOOT_CAN_RECOVERY
+	bool "MCUboot CAN recovery"
+	select CAN
+	select REBOOT
+	help
+	  Enable a minimal MCUboot-native CAN recovery transport. This recovery
+	  path does not depend on MCUmgr or the main application and can be used
+	  to upload an image directly into the secondary slot.
+
+config BOOT_CAN_RECOVERY_WINDOW_MS
+	int "Host detect window [ms]"
+	depends on BOOT_CAN_RECOVERY
+	default 200
+	range 1 10000
+	help
+	  Milliseconds MCUboot waits for the host HELLO command before booting the
+	  application when the failed-boot threshold is not active.
+
+config BOOT_CAN_RECOVERY_FAILED_BOOT_THRESHOLD
+	int "Failed boot threshold"
+	depends on BOOT_CAN_RECOVERY
+	default 3
+	range 1 255
+	help
+	  Number of consecutive risky boot attempts after which MCUboot stays in
+	  CAN recovery mode without using the host detect window.
+
+config BOOT_CAN_RECOVERY_RX_ID
+	hex "CAN RX identifier"
+	depends on BOOT_CAN_RECOVERY
+	default 0x720
+	help
+	  Standard CAN identifier used for host-to-device traffic.
+
+config BOOT_CAN_RECOVERY_TX_ID
+	hex "CAN TX identifier"
+	depends on BOOT_CAN_RECOVERY
+	default 0x721
+	help
+	  Standard CAN identifier used for device-to-host traffic.
+
+config BOOT_CAN_RECOVERY_MAX_CHUNK
+	int "Maximum write chunk [bytes]"
+	depends on BOOT_CAN_RECOVERY
+	default 256
+	range 32 512
+	help
+	  Maximum payload bytes accepted by one WRITE command.
+
+config BOOT_CAN_RECOVERY_SLOT_RESERVE
+	int "Reserved bytes at end of secondary slot"
+	depends on BOOT_CAN_RECOVERY
+	default 8192
+	range 1024 65536
+	help
+	  Conservative reserve kept free at the end of the secondary slot for the
+	  MCUboot trailer and slot metadata.
+
+endmenu
