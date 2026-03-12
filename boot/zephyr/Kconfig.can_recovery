@@ -4,6 +4,8 @@ menu "CAN recovery"
 
 config BOOT_CAN_RECOVERY
 	bool "MCUboot CAN recovery"
+	depends on !BOOT_DIRECT_XIP
+	depends on !BOOT_RAM_LOAD
 	select CAN
 	select REBOOT
 	help

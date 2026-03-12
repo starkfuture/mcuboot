@@ -421,6 +421,22 @@ int boot_open_all_flash_areas(struct boot_loader_state *state);
  */
 void boot_close_all_flash_areas(struct boot_loader_state *state);
 
+#if (!defined(MCUBOOT_DIRECT_XIP) && !defined(MCUBOOT_RAM_LOAD)) || \
+    defined(MCUBOOT_SERIAL_IMG_GRP_SLOT_INFO)
+/**
+ * Populates sector information for a specific flash area in the boot state.
+ *
+ * This is an internal helper used by MCUboot flows that need a fully
+ * initialized boot_loader_state before validating or manipulating an image.
+ *
+ * @param state      Bootloader state.
+ * @param flash_area Flash area ID to initialize.
+ *
+ * @return 0 on success, another value otherwise.
+ */
+int boot_initialize_area(struct boot_loader_state *state, int flash_area);
+#endif
+
 #if !defined(MCUBOOT_DIRECT_XIP) && !defined(MCUBOOT_RAM_LOAD)
 /**
  * Determines the sector layout of both image slots and the scratch area.
