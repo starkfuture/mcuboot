@@ -17,15 +17,18 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#include "boot_shared_state.h"
 #include "bootutil/bootutil.h"
+#include "bootutil/image.h"
 #include "bootutil/bootutil_log.h"
 #include "bootutil/bootutil_public.h"
+#include "bootutil/fault_injection_hardening.h"
+#include "bootutil_priv.h"
 #include "sysflash/sysflash.h"
 
 BOOT_LOG_MODULE_DECLARE(mcuboot);
 
 #define CAN_RECOVERY_PROTO_VERSION 1U
-#define CAN_RECOVERY_MAGIC 0x43524e42U
 #define CAN_RECOVERY_FRAME_SOF  0xA0U
 #define CAN_RECOVERY_FRAME_DATA 0xB0U
 #define CAN_RECOVERY_TID_MASK 0x0FU
@@ -33,6 +36,7 @@ BOOT_LOG_MODULE_DECLARE(mcuboot);
 #define CAN_RECOVERY_SEND_TIMEOUT_MS 100
 #define CAN_RECOVERY_RX_POLL_MS 50
 #define CAN_RECOVERY_WRITE_HDR_LEN 8U
+#define CAN_RECOVERY_VALIDATE_TMPBUF_SZ 256U
 
 enum can_recovery_msg_type {
 	CAN_RECOVERY_HELLO_REQ = 1,
@@ -45,6 +49,9 @@ enum can_recovery_msg_type {
 	CAN_RECOVERY_FINALIZE_RSP = 8,
 	CAN_RECOVERY_RESET_REQ = 9,
 	CAN_RECOVERY_RESET_RSP = 10,
+	CAN_RECOVERY_START_ACK = 11,
+	CAN_RECOVERY_FINALIZE_ACK = 12,
+	CAN_RECOVERY_PROGRESS_EVT = 13,
 };
 
 enum can_recovery_status {
@@ -59,12 +66,6 @@ enum can_recovery_status {
 	CAN_RECOVERY_STATUS_CAN = 8,
 	CAN_RECOVERY_STATUS_TOO_LARGE = 9,
 	CAN_RECOVERY_STATUS_INTERNAL = 10,
-};
-
-struct can_recovery_retained {
-	uint32_t magic;
-	uint8_t boot_attempts;
-	uint8_t reserved[3];
 };
 
 struct can_recovery_session {
@@ -117,6 +118,10 @@ struct can_recovery_finalize_rsp {
 	uint32_t image_size;
 } __packed;
 
+struct can_recovery_ack {
+	uint8_t status;
+} __packed;
+
 BUILD_ASSERT(DT_HAS_CHOSEN(zephyr_canbus), "MCUboot CAN recovery requires zephyr,canbus");
 CAN_MSGQ_DEFINE(can_recovery_rx_msgq, 32);
 
@@ -124,7 +129,6 @@ static const struct device *const can_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_canbu
 static int can_recovery_filter_id = -1;
 static struct can_recovery_session can_recovery_session;
 static struct can_recovery_rx_assembly can_recovery_rx;
-static struct can_recovery_retained can_recovery_retained __noinit;
 static uint8_t can_recovery_tx_tid;
 
 static uint16_t can_recovery_crc16(const uint8_t *data, size_t len)
@@ -166,41 +170,24 @@ static bool can_recovery_boot_is_risky(void)
 	return (swap_type == BOOT_SWAP_TYPE_TEST) || (swap_type == BOOT_SWAP_TYPE_REVERT);
 }
 
-static void can_recovery_retained_init(void)
-{
-	if (can_recovery_retained.magic != CAN_RECOVERY_MAGIC) {
-		can_recovery_retained.magic = CAN_RECOVERY_MAGIC;
-		can_recovery_retained.boot_attempts = 0U;
-	}
-
-	if (!can_recovery_boot_is_risky()) {
-		can_recovery_retained.boot_attempts = 0U;
-	}
-}
-
 static bool can_recovery_failed_boot_threshold_hit(void)
 {
-	can_recovery_retained_init();
-	return can_recovery_retained.boot_attempts >= CONFIG_BOOT_CAN_RECOVERY_FAILED_BOOT_THRESHOLD;
+	return boot_shared_state_get_failed_boots() >= CONFIG_BOOT_CAN_RECOVERY_FAILED_BOOT_THRESHOLD;
 }
 
 static void can_recovery_clear_boot_attempts(void)
 {
-	can_recovery_retained.magic = CAN_RECOVERY_MAGIC;
-	can_recovery_retained.boot_attempts = 0U;
+	(void)boot_shared_state_set_failed_boots(0U);
 }
 
 void boot_can_recovery_note_boot_attempt(void)
 {
-	can_recovery_retained_init();
-
 	if (!can_recovery_boot_is_risky()) {
+		can_recovery_clear_boot_attempts();
 		return;
 	}
 
-	if (can_recovery_retained.boot_attempts < UINT8_MAX) {
-		can_recovery_retained.boot_attempts++;
-	}
+	(void)boot_shared_state_increment_failed_boots(NULL);
 }
 
 static uint32_t can_recovery_slot_capacity(const struct flash_area *secondary)
@@ -433,12 +420,81 @@ static int can_recovery_crc_slot(const struct flash_area *secondary, uint32_t im
 	return 0;
 }
 
+static int can_recovery_validate_slot(const struct flash_area *secondary)
+{
+	struct image_header hdr = { 0 };
+	struct boot_loader_state *state = boot_get_loader_state();
+	static boot_sector_t primary_sectors[BOOT_MAX_IMG_SECTORS];
+	static boot_sector_t secondary_sectors[BOOT_MAX_IMG_SECTORS];
+#if MCUBOOT_SWAP_USING_SCRATCH
+	static boot_sector_t scratch_sectors[BOOT_MAX_IMG_SECTORS];
+#endif
+	static uint8_t tmpbuf[CAN_RECOVERY_VALIDATE_TMPBUF_SZ];
+	FIH_DECLARE(fih_rc, FIH_FAILURE);
+	int rc;
+
+	boot_state_clear(state);
+	BOOT_IMG(state, BOOT_PRIMARY_SLOT).sectors = primary_sectors;
+	BOOT_IMG(state, BOOT_SECONDARY_SLOT).sectors = secondary_sectors;
+#if MCUBOOT_SWAP_USING_SCRATCH
+	state->scratch.sectors = scratch_sectors;
+#endif
+
+	rc = boot_open_all_flash_areas(state);
+	if (rc != 0) {
+		BOOT_LOG_ERR("Opening flash areas failed: %d", rc);
+		boot_state_clear(state);
+		return -EINVAL;
+	}
+
+	rc = boot_initialize_area(state, FLASH_AREA_IMAGE_PRIMARY(0));
+	if (rc != 0) {
+		BOOT_LOG_ERR("Primary slot init failed: %d", rc);
+		goto out;
+	}
+
+	rc = boot_initialize_area(state, FLASH_AREA_IMAGE_SECONDARY(0));
+	if (rc != 0) {
+		BOOT_LOG_ERR("Secondary slot init failed: %d", rc);
+		goto out;
+	}
+
+#if MCUBOOT_SWAP_USING_SCRATCH
+	rc = boot_initialize_area(state, FLASH_AREA_IMAGE_SCRATCH);
+	if (rc != 0) {
+		BOOT_LOG_ERR("Scratch area init failed: %d", rc);
+		goto out;
+	}
+#endif
+
+	rc = boot_image_load_header(secondary, &hdr);
+	if (rc != 0) {
+		BOOT_LOG_ERR("Image header read failed: %d", rc);
+		goto out;
+	}
+
+	FIH_CALL(bootutil_img_validate, fih_rc, state, &hdr, secondary, tmpbuf,
+		 sizeof(tmpbuf), NULL, 0, NULL);
+	if (FIH_NOT_EQ(fih_rc, FIH_SUCCESS)) {
+		BOOT_LOG_ERR("Image validation failed");
+		rc = -EINVAL;
+		goto out;
+	}
+
+	rc = 0;
+
+out:
+	boot_close_all_flash_areas(state);
+	boot_state_clear(state);
+	return rc;
+}
+
 static int can_recovery_handle_hello(const struct flash_area *secondary)
 {
 	struct can_recovery_hello_rsp rsp = {
 		.proto_version = CAN_RECOVERY_PROTO_VERSION,
 		.status = CAN_RECOVERY_STATUS_OK,
-		.failed_boots = can_recovery_retained.boot_attempts,
+		.failed_boots = MIN(boot_shared_state_get_failed_boots(), UINT8_MAX),
 		.reserved = 0U,
 		.slot_size = can_recovery_slot_capacity(secondary),
 		.max_chunk = CONFIG_BOOT_CAN_RECOVERY_MAX_CHUNK,
@@ -466,6 +522,15 @@ static int can_recovery_handle_start(const struct flash_area *secondary,
 	if ((req->image_size == 0U) || (req->image_size > rsp.slot_size)) {
 		rsp.status = CAN_RECOVERY_STATUS_TOO_LARGE;
 		return can_recovery_send_message(CAN_RECOVERY_START_RSP, &rsp, sizeof(rsp));
+	}
+
+	{
+		struct can_recovery_ack ack = { .status = CAN_RECOVERY_STATUS_OK };
+
+		rc = can_recovery_send_message(CAN_RECOVERY_START_ACK, &ack, sizeof(ack));
+		if (rc != 0) {
+			return rc;
+		}
 	}
 
 	rc = can_recovery_erase_slot(secondary);
@@ -568,6 +633,21 @@ static int can_recovery_handle_finalize(const struct flash_area *secondary,
 		return can_recovery_send_message(CAN_RECOVERY_FINALIZE_RSP, &rsp, sizeof(rsp));
 	}
 
+	{
+		struct can_recovery_ack ack = { .status = CAN_RECOVERY_STATUS_OK };
+
+		rc = can_recovery_send_message(CAN_RECOVERY_FINALIZE_ACK, &ack, sizeof(ack));
+		if (rc != 0) {
+			return rc;
+		}
+	}
+
+	{
+		uint8_t progress[2] = { 1U, 0U };
+
+		(void)can_recovery_send_message(CAN_RECOVERY_PROGRESS_EVT, progress, sizeof(progress));
+	}
+
 	rc = can_recovery_crc_slot(secondary, req->image_size, &readback_crc);
 	if (rc != 0) {
 		rsp.status = CAN_RECOVERY_STATUS_FLASH;
@@ -579,10 +659,40 @@ static int can_recovery_handle_finalize(const struct flash_area *secondary,
 		return can_recovery_send_message(CAN_RECOVERY_FINALIZE_RSP, &rsp, sizeof(rsp));
 	}
 
-	rc = boot_set_pending(0);
+	{
+		uint8_t progress[2] = { 2U, 0U };
+
+		(void)can_recovery_send_message(CAN_RECOVERY_PROGRESS_EVT, progress, sizeof(progress));
+	}
+
+	{
+		uint8_t progress[2] = { 3U, 0U };
+
+		(void)can_recovery_send_message(CAN_RECOVERY_PROGRESS_EVT, progress, sizeof(progress));
+	}
+
+	rc = can_recovery_validate_slot(secondary);
 	if (rc != 0) {
 		rsp.status = CAN_RECOVERY_STATUS_INTERNAL;
 		return can_recovery_send_message(CAN_RECOVERY_FINALIZE_RSP, &rsp, sizeof(rsp));
+	}
+
+	{
+		uint8_t progress[2] = { 4U, 0U };
+
+		(void)can_recovery_send_message(CAN_RECOVERY_PROGRESS_EVT, progress, sizeof(progress));
+	}
+
+	rc = boot_set_pending(1);
+	if (rc != 0) {
+		rsp.status = CAN_RECOVERY_STATUS_INTERNAL;
+		return can_recovery_send_message(CAN_RECOVERY_FINALIZE_RSP, &rsp, sizeof(rsp));
+	}
+
+	{
+		uint8_t progress[2] = { 5U, 0U };
+
+		(void)can_recovery_send_message(CAN_RECOVERY_PROGRESS_EVT, progress, sizeof(progress));
 	}
 
 	can_recovery_session.started = false;
@@ -606,12 +716,13 @@ static int can_recovery_handle_reset(void)
 	return rc;
 }
 
-static void can_recovery_server_loop(void)
+static void can_recovery_server_loop(int32_t idle_timeout_ms)
 {
 	const struct flash_area *secondary = NULL;
 	uint8_t msg_type;
 	uint16_t payload_len;
 	uint8_t payload[CAN_RECOVERY_MSG_MAX];
+	int64_t last_activity = k_uptime_get();
 	int rc = flash_area_open(FLASH_AREA_IMAGE_SECONDARY(0), &secondary);
 
 	if (rc != 0) {
@@ -622,10 +733,17 @@ static void can_recovery_server_loop(void)
 	BOOT_LOG_INF("Entering CAN recovery on %s", can_dev->name);
 
 	while (true) {
-		rc = can_recovery_poll_message(-1, &msg_type, payload, &payload_len);
+		rc = can_recovery_poll_message(CAN_RECOVERY_RX_POLL_MS, &msg_type, payload, &payload_len);
 		if (rc != 0) {
+			if ((idle_timeout_ms > 0) &&
+			    ((k_uptime_get() - last_activity) >= idle_timeout_ms)) {
+				BOOT_LOG_INF("CAN recovery idle timeout expired");
+				return;
+			}
 			continue;
 		}
+
+		last_activity = k_uptime_get();
 
 		switch (msg_type) {
 		case CAN_RECOVERY_HELLO_REQ:
@@ -655,15 +773,24 @@ void boot_can_recovery_check(void)
 	uint8_t msg_type;
 	uint16_t payload_len;
 	uint8_t payload[CAN_RECOVERY_MSG_MAX];
+	uint32_t forced_window_s = 0U;
+	int32_t idle_timeout_ms = CONFIG_BOOT_CAN_RECOVERY_IDLE_TIMEOUT_S * MSEC_PER_SEC;
 
 	if (can_recovery_init_bus() != 0) {
 		return;
 	}
 
+	if (boot_shared_state_consume_bootloader_request(&forced_window_s)) {
+		BOOT_LOG_INF("CAN recovery requested for %u s", forced_window_s);
+		can_recovery_server_loop((int32_t)MIN(forced_window_s, UINT32_MAX / MSEC_PER_SEC) *
+					 MSEC_PER_SEC);
+		return;
+	}
+
 	if (can_recovery_failed_boot_threshold_hit()) {
 		BOOT_LOG_WRN("CAN recovery forced after %u failed risky boots",
-			     can_recovery_retained.boot_attempts);
-		can_recovery_server_loop();
+			     boot_shared_state_get_failed_boots());
+		can_recovery_server_loop(idle_timeout_ms);
 		return;
 	}
 
@@ -680,5 +807,5 @@ void boot_can_recovery_check(void)
 		(void)can_recovery_handle_hello(secondary);
 	}
 
-	can_recovery_server_loop();
+	can_recovery_server_loop(idle_timeout_ms);
 }

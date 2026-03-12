@@ -60,4 +60,14 @@ config BOOT_CAN_RECOVERY_SLOT_RESERVE
 	  Conservative reserve kept free at the end of the secondary slot for the
 	  MCUboot trailer and slot metadata.
 
+config BOOT_CAN_RECOVERY_IDLE_TIMEOUT_S
+	int "Recovery idle timeout [s]"
+	depends on BOOT_CAN_RECOVERY
+	default 3
+	range 1 3600
+	help
+	  Maximum inactivity period while MCUboot is in CAN recovery. If no valid
+	  CAN recovery message is received within this period, MCUboot leaves
+	  recovery mode and continues booting the application.
+
 endmenu

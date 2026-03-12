@@ -71,6 +71,7 @@ zephyr_library_sources(
   flash_map_extended.c
   os.c
   keys.c
+  boot_shared_state.c
   )
 
 zephyr_library_sources_ifdef(
@@ -109,6 +110,7 @@ endif()
 
 # Generic bootutil sources and includes.
 zephyr_library_include_directories(${BOOT_DIR}/bootutil/include)
+zephyr_library_include_directories(${BOOT_DIR}/bootutil/src)
 zephyr_library_sources(
   ${BOOT_DIR}/bootutil/src/image_validate.c
   ${BOOT_DIR}/bootutil/src/tlv.c
