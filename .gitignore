@@ -7,8 +7,7 @@ rusty-tags.*
 
 # mynewt
 /repos/
-/project.state
-/bin/
+/project.state/
 /targets/
 **/build/**/*
 
@@ -28,3 +27,4 @@ rusty-tags.*
 
 # The target directory from Rust development
 /target/
+/.idea/
