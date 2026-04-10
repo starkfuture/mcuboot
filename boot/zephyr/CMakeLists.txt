@@ -79,6 +79,11 @@ zephyr_library_sources_ifdef(
   can_recovery.c
   )
 
+zephyr_library_sources_ifdef(
+  CONFIG_BOOT_CAN_BRIDGE
+  can_bridge.c
+  )
+
 if(DEFINED CONFIG_ENABLE_MGMT_PERUSER)
   zephyr_library_sources(
     boot_serial_extensions.c

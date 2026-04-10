@@ -73,3 +73,31 @@ config BOOT_CAN_RECOVERY_IDLE_TIMEOUT_S
 	  recovery mode and continues booting the application.
 
 endmenu
+
+menu "CAN bridge"
+
+config BOOT_CAN_BRIDGE
+	bool "MCUboot CAN bridge"
+	depends on BOOT_CAN_RECOVERY
+	help
+	  Enable a transparent bootloader-side CAN bridge that forwards frames
+	  between two devicetree-selected CAN controllers while MCUboot is in
+	  CAN recovery mode.
+
+config BOOT_CAN_BRIDGE_DIAG_UART_RX_ID
+	hex "Excluded diagnostic UART-over-CAN RX identifier"
+	depends on BOOT_CAN_BRIDGE
+	default 0x7F0
+	help
+	  Standard CAN identifier reserved for host-to-device UART-over-CAN
+	  traffic that must not be forwarded by the bootloader bridge.
+
+config BOOT_CAN_BRIDGE_DIAG_UART_TX_ID
+	hex "Excluded diagnostic UART-over-CAN TX identifier"
+	depends on BOOT_CAN_BRIDGE
+	default 0x7F1
+	help
+	  Standard CAN identifier reserved for device-to-host UART-over-CAN
+	  traffic that must not be forwarded by the bootloader bridge.
+
+endmenu

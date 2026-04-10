@@ -25,6 +25,7 @@
 #include "bootutil/fault_injection_hardening.h"
 #include "bootutil_priv.h"
 #include "sysflash/sysflash.h"
+#include "can_bridge.h"
 
 BOOT_LOG_MODULE_DECLARE(mcuboot);
 
@@ -730,15 +731,23 @@ static void can_recovery_server_loop(int32_t idle_timeout_ms)
 		return;
 	}
 
+#if defined(CONFIG_BOOT_CAN_BRIDGE)
+	rc = boot_can_bridge_start();
+	if (rc != 0) {
+		BOOT_LOG_WRN("CAN bridge unavailable: %d", rc);
+	}
+#endif
+
 	BOOT_LOG_INF("Entering CAN recovery on %s", can_dev->name);
 
 	while (true) {
+		boot_can_bridge_pump();
 		rc = can_recovery_poll_message(CAN_RECOVERY_RX_POLL_MS, &msg_type, payload, &payload_len);
 		if (rc != 0) {
 			if ((idle_timeout_ms > 0) &&
 			    ((k_uptime_get() - last_activity) >= idle_timeout_ms)) {
 				BOOT_LOG_INF("CAN recovery idle timeout expired");
-				return;
+				break;
 			}
 			continue;
 		}
@@ -765,6 +774,10 @@ static void can_recovery_server_loop(int32_t idle_timeout_ms)
 			break;
 		}
 	}
+
+#if defined(CONFIG_BOOT_CAN_BRIDGE)
+	boot_can_bridge_stop();
+#endif
 }
 
 void boot_can_recovery_check(void)
