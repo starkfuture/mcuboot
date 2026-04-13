@@ -741,7 +741,6 @@ static void can_recovery_server_loop(int32_t idle_timeout_ms)
 	BOOT_LOG_INF("Entering CAN recovery on %s", can_dev->name);
 
 	while (true) {
-		boot_can_bridge_pump();
 		rc = can_recovery_poll_message(CAN_RECOVERY_RX_POLL_MS, &msg_type, payload, &payload_len);
 		if (rc != 0) {
 			if ((idle_timeout_ms > 0) &&
